@@ -12,7 +12,8 @@ const app = express();
  */
 const pool = new Pool({
   // 예: 'postgres://postgres.abcde:my-password-123@db.abcde.supabase.co:5432/postgres'
-  connectionString: process.env.DATABASE_URL || 'postgresql://postgres:gpffhdnzoavld12@db.yobiwljswthbcfayisew.supabase.co:5432/postgres',
+  connectionString: process.env.DATABASE_URL || 'postgresql://postgres.yobiwljswthbcfayisew:gpffhdnzoavld12@aws-1-ap-northeast-2.pooler.supabase.com:5432/postgres'
+  ,
   ssl: { rejectUnauthorized: false }
 });
 
@@ -82,3 +83,4 @@ app.get('/api/data', async (req, res) => {
 
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => console.log(`🚀 서버 가동 중: ${PORT}`));
+
