@@ -8,7 +8,11 @@ const path = require('path');
 const app = express();
 
 // 1. 보안 및 데이터 용량 제한 설정 (대용량 엑셀 대응)
-app.use(cors());
+app.use(cors({
+  origin: '*', // 모든 도메인 허용 (테스트용으로 가장 확실함)
+  methods: ['GET', 'POST', 'DELETE'],
+  credentials: true
+}));
 app.use(express.json({ limit: '100mb' }));
 app.use(express.urlencoded({ limit: '100mb', extended: true }));
 
@@ -192,4 +196,5 @@ app.delete('/api/clear', (req, res) => {
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`✅ 서버 대기 중: 포트 ${PORT}`);
+
 });
