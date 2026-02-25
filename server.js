@@ -10,8 +10,8 @@ const app = express();
  * 1. PostgreSQL 데이터베이스 연결 설정
  */
 const pool = new Pool({
-  // 이전에 성공하셨던 6543 포트(Pooler) 주소와 비밀번호를 그대로 사용하세요!
-  connectionString: process.env.DATABASE_URL || 'postgresql://postgres.yobiwljswthbcfayisew:WHD147.,.ww@aws-1-ap-northeast-2.pooler.supabase.com:5432/postgres'
+  // 포트번호를 5432로 복구하고, 에러가 났던 끝부분 쉼표(,)를 추가했습니다.
+  connectionString: process.env.DATABASE_URL || 'postgresql://postgres.yobiwljswthbcfayisew:WHD147.,.ww@aws-1-ap-northeast-2.pooler.supabase.com:5432/postgres',
   ssl: { rejectUnauthorized: false }
 });
 
