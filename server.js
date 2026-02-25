@@ -10,7 +10,7 @@ const app = express();
  * 1. PostgreSQL 데이터베이스 연결 설정
  */
 const pool = new Pool({
-  // 포트번호를 5432로 복구하고, 에러가 났던 끝부분 쉼표(,)를 추가했습니다.
+  // 정상 작동 확인된 5432 포트 주소입니다.
   connectionString: process.env.DATABASE_URL || 'postgresql://postgres.yobiwljswthbcfayisew:WHD147.,.ww@aws-1-ap-northeast-2.pooler.supabase.com:5432/postgres',
   ssl: { rejectUnauthorized: false }
 });
@@ -19,9 +19,6 @@ app.use(cors());
 app.use(express.json({ limit: '100mb' }));
 app.use(express.urlencoded({ limit: '100mb', extended: true }));
 
-/**
- * 2. 데이터베이스 테이블 초기화
- */
 const initDB = async () => {
   try {
     await pool.query(`
@@ -33,11 +30,15 @@ const initDB = async () => {
         views INTEGER,
         sales INTEGER,
         date_str TEXT,
-        month_str TEXT,
-        UNIQUE(product_id, date_str)
+        month_str TEXT
       )
     `);
-    console.log("✅ PostgreSQL 테이블 준비 완료 (Supabase 연결됨)");
+    // 1. 기존에 잘못 걸려있던 제약조건(ID+날짜 기준)을 삭제합니다.
+    await pool.query(`ALTER TABLE sales_data DROP CONSTRAINT IF EXISTS sales_data_product_id_date_str_key`).catch(() => {});
+    // 2. 새로운 제약조건(ID+상품명+날짜 기준)을 추가합니다.
+    await pool.query(`ALTER TABLE sales_data ADD CONSTRAINT unique_pid_name_date UNIQUE(product_id, product_name, date_str)`).catch(() => {});
+
+    console.log("✅ PostgreSQL 테이블 준비 완료");
   } catch (err) {
     console.error("❌ DB 초기화 실패:", err);
   }
@@ -47,28 +48,22 @@ initDB();
 const upload = multer({ storage: multer.memoryStorage() });
 
 /**
- * [핵심 개선] API 1: 엑셀 업로드 및 초고속 일괄 저장 (Bulk Upsert)
- * 기존의 for문을 돌며 하나씩 INSERT 하던 방식을 버리고,
- * 수천 개의 데이터를 단 하나의 쿼리로 묶어서 1초 만에 DB에 밀어넣습니다.
+ * [API 1] 엑셀 업로드 (1차 엑셀 내부 중복 제거 + 2차 DB 덮어쓰기)
  */
 app.post('/api/upload', upload.single('excelFile'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: '파일이 없습니다.' });
     
-    // 1. 엑셀 파일 해독
     const workbook = xlsx.read(req.file.buffer, { type: 'buffer' });
     const data = xlsx.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]]);
     
-    // 파일 이름에서 날짜 추출 (예: 2024-02-25_data.xlsx -> 2024-02-25)
     const dateStr = req.file.originalname.match(/\d{4}-\d{1,2}-\d{1,2}/)?.[0] || 'Unknown';
     const monthStr = dateStr !== 'Unknown' ? dateStr.substring(0, 7) : 'Unknown';
 
-    console.log(`[업로드 시작] ${req.file.originalname} (데이터 ${data.length}줄) 처리 중...`);
+    console.log(`[업로드 시작] ${req.file.originalname} 처리 중...`);
 
-    // 2. 일괄 삽입(Bulk Insert)을 위한 데이터 배열 만들기
-    const values = [];
-    const flatParams = [];
-    let paramIndex = 1;
+    // 🔥 [1차 중복 제거] 상품ID와 '상품명'이 모두 똑같을 때만 합칩니다.
+    const uniqueDataMap = new Map();
 
     for (const item of data) {
       const pid = String(item['상품ID'] || item['상품번호'] || '');
@@ -79,31 +74,47 @@ app.post('/api/upload', upload.single('excelFile'), async (req, res) => {
       const views = Number(item['상품상세조회수']) || 0;
       const sales = Number(item['결제상품수량']) || 0;
 
-      // PostgreSQL 다중 INSERT 문법에 맞게 ($1, $2, $3...) 괄호 묶음 생성
+      // ID와 이름을 결합한 고유 키 생성 (이름이 다르면 합쳐지지 않음)
+      const uniqueKey = `${pid}_${name}`;
+
+      if (uniqueDataMap.has(uniqueKey)) {
+        // 완벽히 일치하는 경우에만 합산
+        const existing = uniqueDataMap.get(uniqueKey);
+        existing.revenue += revenue;
+        existing.views += views;
+        existing.sales += sales;
+      } else {
+        uniqueDataMap.set(uniqueKey, { pid, name, revenue, views, sales });
+      }
+    }
+
+    const uniqueData = Array.from(uniqueDataMap.values());
+    if (uniqueData.length === 0) return res.status(400).json({ error: '유효한 데이터가 없습니다.' });
+
+    const values = [];
+    const flatParams = [];
+    let paramIndex = 1;
+
+    for (const item of uniqueData) {
       values.push(`($${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++})`);
-      flatParams.push(pid, name, revenue, views, sales, dateStr, monthStr);
+      flatParams.push(item.pid, item.name, item.revenue, item.views, item.sales, dateStr, monthStr);
     }
 
-    if (values.length === 0) {
-      return res.status(400).json({ error: '저장할 유효한 데이터가 엑셀에 없습니다. (상품ID 누락 등)' });
-    }
-
-    // 3. 단 하나의 거대한 쿼리 조립 및 실행 (1초 컷)
+    // 🔥 [2차 중복 제거] DB 덮어쓰기 기준에 '상품명'을 추가합니다.
     const query = `
       INSERT INTO sales_data (product_id, product_name, revenue, views, sales, date_str, month_str)
       VALUES ${values.join(', ')}
-      ON CONFLICT (product_id, date_str) 
+      ON CONFLICT (product_id, product_name, date_str) 
       DO UPDATE SET 
-        product_name = EXCLUDED.product_name, 
         revenue = EXCLUDED.revenue, 
         views = EXCLUDED.views, 
         sales = EXCLUDED.sales
     `;
 
     await pool.query(query, flatParams);
-    console.log(`✅ [업로드 완료] ${values.length}개 데이터 초고속 저장 성공`);
+    console.log(`✅ [업로드 완료] 총 ${uniqueData.length}개 상품 (중복 압축됨) 저장 성공`);
 
-    res.json({ message: '성공적으로 저장되었습니다.', count: values.length });
+    res.json({ message: '성공적으로 저장되었습니다.', count: uniqueData.length });
   } catch (e) {
     console.error("❌ 업로드 에러:", e);
     res.status(500).json({ error: e.message });
@@ -111,7 +122,7 @@ app.post('/api/upload', upload.single('excelFile'), async (req, res) => {
 });
 
 /**
- * [API 2] 대시보드 통계 데이터 조회 (기존과 동일)
+ * [API 2] 대시보드 통계 데이터 조회
  */
 app.get('/api/data', async (req, res) => {
   try {
